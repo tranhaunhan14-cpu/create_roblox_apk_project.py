@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Trình khởi tạo tự động Dự án Android (.APK) hoàn chỉnh từ mã nguồn Roblox_Screen_Translator.py.
+Trình khởi tạo tự động Dự án Android (.APK) hoàn chỉnh - Phiên bản V2 (Đã vá lỗi lặp chữ & tràn khung).
 
-Bạn không cần dùng đến Claude Code nữa! Chỉ cần chạy file Python này:
-    python create_roblox_apk_project.py
-(Có thể chạy ngay trên điện thoại bằng Pydroid 3, hoặc chạy trên GitHub Codespaces / máy tính).
-
-Script sẽ tự động tạo ra thư mục dự án `RobloxTranslatorAPK/` đầy đủ 100% mã nguồn Kotlin
-đã chuyển đổi từ `Roblox_Screen_Translator.py` + file cấu hình GitHub Actions để tự động
-đóng gói ra file `app-debug.apk` miễn phí trên đám mây GitHub.
+Các lỗi đã được khắc phục triệt để trong bản V2:
+1. Chống vòng lặp tự dịch đè chữ Tiếng Việt (Feedback Loop):
+   - Tự động bỏ qua mọi dòng chữ đã có dấu Tiếng Việt (ă, â, đ, ê, ô, ơ, ư, sắc, huyền, hỏi, ngã, nặng...)
+     để OCR không bao giờ đọc lại chính hộp chữ Tiếng Việt vừa dịch rồi dịch chồng lên nhau.
+   - Loại trừ vùng thanh điều khiển nổi ("🟢 Đang dịch | 🧹 Cache | ✖") và thanh trạng thái pin/giờ
+     khỏi vùng quét OCR.
+2. Chống chụp dính lớp phủ (Clean Capture):
+   - Tạm ẩn lớp phủ (alpha = 0f), xả bỏ khung hình cũ trong bộ đệm ImageReader và chờ khung hình
+     mới sạch 100% trước khi đưa vào ML Kit OCR.
+3. Chống gộp tràn toàn màn hình:
+   - Giới hạn gộp tối đa theo từng cụm hộp thoại nhỏ (không gộp quá 3 dòng hoặc quá 18% chiều cao màn hình),
+     giữ từng câu thoại/nhiệm vụ nằm gọn đúng vị trí chữ gốc.
 """
 
 import os
@@ -62,8 +67,8 @@ android {
         applicationId = "com.roblox.translator"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "2.0.0"
     }
 
     buildTypes {
@@ -84,7 +89,6 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
-    // Google ML Kit Text Recognition v2 (Chạy OCR trực tiếp trên phần cứng điện thoại)
     implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 }
@@ -109,10 +113,10 @@ dependencies {
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop">
-            <intent-intent-filter>
+            <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
-            </intent-intent-filter>
+            </intent-filter>
         </activity>
 
         <service
@@ -122,27 +126,24 @@ dependencies {
             android:foregroundServiceType="mediaProjection" />
     </application>
 </manifest>
-""".replace("intent-intent-filter", "intent-filter"),
+""",
 
     "app/src/main/java/com/roblox/translator/Config.kt": """package com.roblox.translator
 
 import android.graphics.Color
 
-/**
- * Giữ nguyên toàn bộ thông số cấu hình từ class Config trong Roblox_Screen_Translator.py
- */
 data class Config(
     val sourceLang: String = "en",
     val targetLang: String = "vi",
-    val scanIntervalMs: Long = 650L,
-    val minConfidence: Float = 0.55f,
-    val ocrMaxWidth: Int = 1920,
-    val thumbWidth: Int = 320,
-    val thumbHeight: Int = 180,
-    val changePixelDelta: Int = 25,
-    val changePixelRatio: Double = 0.001,
+    val scanIntervalMs: Long = 900L,
+    val minConfidence: Float = 0.65f,
+    val ocrMaxWidth: Int = 1280,
+    val thumbWidth: Int = 160,
+    val thumbHeight: Int = 90,
+    val changePixelDelta: Int = 32,
+    val changePixelRatio: Double = 0.02, // Cần ít nhất 2% cảnh màn hình thay đổi mới quét lại
     val translateTimeoutMs: Long = 8000L,
-    val translateMaxChars: Int = 4500,
+    val translateMaxChars: Int = 1500,
     val translateWorkers: Int = 4,
     val cacheSize: Int = 2000,
     val failCooldownAfter: Int = 3,
@@ -150,7 +151,7 @@ data class Config(
     val overlayBgColor: Int = Color.parseColor("#E6141824"),
     val overlayTextColor: Int = Color.parseColor("#FFE066"),
     val overlayBorderColor: Int = Color.parseColor("#3B82F6"),
-    val fontSizeSp: Float = 12f
+    val fontSizeSp: Float = 11.5f
 )
 """,
 
@@ -158,9 +159,6 @@ data class Config(
 
 import kotlin.math.max
 
-/**
- * Chuyển đổi nguyên bản từ dataclass TextBlock trong Roblox_Screen_Translator.py
- */
 data class TextBlock(
     val x1: Int,
     val y1: Int,
@@ -184,20 +182,22 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
-/**
- * Chuyển đổi 1:1 các thuật toán từ Roblox_Screen_Translator.py:
- * - Bộ lọc _should_skip_text
- * - Thuật toán Union-Find merge_nearby_blocks, _is_adjacent, _build_block, _join_parts
- * - FrameChangeDetector (kèm cơ chế loại trừ vùng hộp chữ đã vẽ để chống tự quét lại)
- */
 object TextBlockMerger {
-    private val cjkRegex = Regex("[\\u3040-\\u30FF\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uAC00-\\uD7AF]")
+    private val cjkRegex = Regex("[\\\\u3040-\\\\u30FF\\\\u3400-\\\\u4DBF\\\\u4E00-\\\\u9FFF\\\\uAC00-\\\\uD7AF]")
+    // Nhận diện các ký tự có dấu đặc trưng của Tiếng Việt để KHÔNG BAO GIỜ tự đọc lại chữ đã dịch
+    private val vietnameseRegex = Regex("[ăâđêôơưĂÂĐÊÔƠƯáàảãạắằẳẵặấầẩẫậéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵÁÀẢÃẠẮẰẲẴẶẤẦẨẪẬÉÈẺẼẸẾỀỂỄỆÍÌỈĨỊÓÒỎÕỌỐỒỔỖỘỚỜỞỠỢÚÙỦŨỤỨỪỬỮỰÝỲỶỸỴ]")
 
     fun shouldSkipText(text: String): Boolean {
         val cleaned = text.trim()
         if (cleaned.isEmpty()) return true
         if (cleaned.length < 2 && !cjkRegex.containsMatchIn(cleaned)) return true
-        return cleaned.none { it.isLetter() }
+        // Nếu chuỗi đã có dấu Tiếng Việt hoặc trùng nút điều khiển thì bỏ qua ngay lập tức
+        if (vietnameseRegex.containsMatchIn(cleaned)) return true
+        val lower = cleaned.lowercase()
+        if (lower.contains("đang dịch") || lower.contains("tạm dừng") || lower.contains("cache")) return true
+        val letterCount = cleaned.count { it.isLetter() }
+        if (letterCount < 2 && !cjkRegex.containsMatchIn(cleaned)) return true
+        return false
     }
 
     private fun joinParts(parts: List<String>): String {
@@ -216,40 +216,29 @@ object TextBlockMerger {
         return sb.toString()
     }
 
-    private fun isAdjacent(a: TextBlock, b: TextBlock): Boolean {
-        val lh = max(a.lineHeight, b.lineHeight).toDouble()
-        val vOverlap = (min(a.y2, b.y2) - max(a.y1, b.y1)).toDouble()
-        if (vOverlap >= 0.5 * min(a.height, b.height)) {
-            val hGap = (max(a.x1, b.x1) - min(a.x2, b.x2)).toDouble()
-            return hGap <= lh * 1.5
+    private fun canMerge(group: List<TextBlock>, candidate: TextBlock, maxGroupHeight: Int): Boolean {
+        if (group.size >= 3) return false // Tối đa 3 dòng mỗi hộp để không tạo hộp khổng lồ che màn hình
+        val gMinX = min(group.minOf { it.x1 }, candidate.x1)
+        val gMaxX = max(group.maxOf { it.x2 }, candidate.x2)
+        val gMinY = min(group.minOf { it.y1 }, candidate.y1)
+        val gMaxY = max(group.maxOf { it.y2 }, candidate.y2)
+        if (gMaxY - gMinY > maxGroupHeight) return false
+
+        return group.any { a ->
+            val lh = max(a.lineHeight, candidate.lineHeight).toDouble()
+            val upper = if (a.y1 <= candidate.y1) a else candidate
+            val lower = if (a.y1 <= candidate.y1) candidate else a
+            val verticalGap = (lower.y1 - upper.y2).toDouble()
+            val hOverlap = min(upper.x2, lower.x2) - max(upper.x1, lower.x1)
+            val leftAlignDiff = abs(lower.x1 - upper.x1).toDouble()
+            (verticalGap in (-0.25 * lh)..(0.55 * lh)) &&
+                    (hOverlap > lh * 0.5 && leftAlignDiff < 1.5 * lh)
         }
-        val upper = if (a.y1 <= b.y1) a else b
-        val lower = if (a.y1 <= b.y1) b else a
-        val verticalGap = (lower.y1 - upper.y2).toDouble()
-        val hOverlap = min(upper.x2, lower.x2) - max(upper.x1, lower.x1)
-        val leftAlignDiff = abs(lower.x1 - upper.x1).toDouble()
-        return (verticalGap in (-0.4 * lh)..(0.85 * lh)) &&
-                (hOverlap > 0 || leftAlignDiff < 2.5 * lh)
     }
 
     private fun buildBlock(members: List<TextBlock>): TextBlock {
-        val lines = mutableListOf<MutableList<TextBlock>>()
-        for (m in members.sortedBy { (it.y1 + it.y2) / 2.0 }) {
-            val cy = (m.y1 + m.y2) / 2.0
-            val lastLine = lines.lastOrNull()
-            if (lastLine != null) {
-                val minY = lastLine.minOf { it.y1 }.toDouble()
-                val maxY = lastLine.maxOf { it.y2 }.toDouble()
-                if (cy in minY..maxY) {
-                    lastLine.add(m)
-                    continue
-                }
-            }
-            lines.add(mutableListOf(m))
-        }
-        val text = lines.joinToString(" ") { line ->
-            joinParts(line.sortedBy { it.x1 }.map { it.originalText })
-        }
+        val sorted = members.sortedWith(compareBy<TextBlock> { it.y1 }.thenBy { it.x1 })
+        val text = joinParts(sorted.map { it.originalText })
         return TextBlock(
             x1 = members.minOf { it.x1 },
             y1 = members.minOf { it.y1 },
@@ -261,30 +250,21 @@ object TextBlockMerger {
         )
     }
 
-    fun mergeNearbyBlocks(blocks: List<TextBlock>): List<TextBlock> {
+    fun mergeNearbyBlocks(blocks: List<TextBlock>, screenH: Int): List<TextBlock> {
         if (blocks.isEmpty()) return emptyList()
-        val parent = IntArray(blocks.size) { it }
-        fun find(x: Int): Int {
-            var r = x
-            while (parent[r] != r) {
-                parent[r] = parent[parent[r]]
-                r = parent[r]
-            }
-            return r
-        }
-        for (i in blocks.indices) {
-            for (j in i + 1 until blocks.size) {
-                if (isAdjacent(blocks[i], blocks[j])) {
-                    parent[find(i)] = find(j)
-                }
+        val maxGroupHeight = (screenH * 0.14).toInt().coerceAtLeast(120)
+        val sorted = blocks.sortedWith(compareBy<TextBlock> { it.y1 }.thenBy { it.x1 })
+        val groups = mutableListOf<MutableList<TextBlock>>()
+
+        for (b in sorted) {
+            val targetGroup = groups.firstOrNull { canMerge(it, b, maxGroupHeight) }
+            if (targetGroup != null) {
+                targetGroup.add(b)
+            } else {
+                groups.add(mutableListOf(b))
             }
         }
-        val groups = linkedMapOf<Int, MutableList<TextBlock>>()
-        for (idx in blocks.indices) {
-            groups.getOrPut(find(idx)) { mutableListOf() }.add(blocks[idx])
-        }
-        return groups.values.map { buildBlock(it) }
-            .sortedWith(compareBy<TextBlock> { it.y1 }.thenBy { it.x1 })
+        return groups.map { buildBlock(it) }
     }
 }
 
@@ -300,10 +280,6 @@ class FrameChangeDetector(
         prevGray = null
     }
 
-    /**
-     * Thu nhỏ ảnh về 320x180 thang xám và bỏ qua vùng các hộp dịch đang hiển thị (maskedRects)
-     * để không bị kích hoạt quét lại do chính hộp chữ dịch của ứng dụng.
-     */
     fun hasChanged(frame: Bitmap, maskedRects: List<Rect>, screenW: Int, screenH: Int): Boolean {
         val scaled = Bitmap.createScaledBitmap(frame, thumbW, thumbH, true)
         val pixels = IntArray(thumbW * thumbH)
@@ -328,16 +304,18 @@ class FrameChangeDetector(
         val scaleY = thumbH.toDouble() / max(1, screenH)
         val scaledMasks = maskedRects.map {
             Rect(
-                (it.left * scaleX).toInt(),
-                (it.top * scaleY).toInt(),
-                (it.right * scaleX).toInt(),
-                (it.bottom * scaleY).toInt()
+                ((it.left - 16) * scaleX).toInt(),
+                ((it.top - 16) * scaleY).toInt(),
+                ((it.right + 16) * scaleX).toInt(),
+                ((it.bottom + 16) * scaleY).toInt()
             )
         }
 
         var changedCount = 0
         var totalValid = 0
-        for (y in 0 until thumbH) {
+        // Bỏ qua 8% mép trên cùng (thanh pin, đồng hồ, sóng điện thoại)
+        val startY = (thumbH * 0.08).toInt()
+        for (y in startY until thumbH) {
             val rowOffset = y * thumbW
             for (x in 0 until thumbW) {
                 if (scaledMasks.any { it.contains(x, y) }) continue
@@ -348,7 +326,11 @@ class FrameChangeDetector(
             }
         }
 
-        val ratio = changedCount.toDouble() / max(1, totalValid)
+        if (totalValid < (thumbW * thumbH) / 10) {
+            return false
+        }
+
+        val ratio = changedCount.toDouble() / totalValid
         if (ratio >= pixelRatio) {
             prevGray = currGray
             return true
@@ -372,12 +354,6 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.min
 import kotlin.math.pow
 
-/**
- * Chuyển đổi 1:1 từ class CachedTranslator trong Roblox_Screen_Translator.py:
- * - Bộ nhớ đệm LruCache 2000 câu
- * - Lỗi mạng không lưu vào cache, tự động tạm nghỉ luỹ thừa (Exponential Backoff Cooldown)
- * - Dịch song song 4 luồng
- */
 class CachedTranslator(private val cfg: Config) {
     private val cache = LruCache<String, String>(cfg.cacheSize)
     private val lock = Any()
@@ -437,7 +413,10 @@ class CachedTranslator(private val cfg: Config) {
                 val seg = outer.getJSONArray(i)
                 if (!seg.isNull(0)) sb.append(seg.getString(0))
             }
-            val translated = sb.toString().ifBlank { text }
+            val translated = sb.toString().trim()
+            if (translated.isEmpty() || translated.equals(text.trim(), ignoreCase = true)) {
+                return ""
+            }
             synchronized(lock) {
                 failStreak = 0
                 cooldownUntilMs = 0L
@@ -502,13 +481,10 @@ import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.view.View
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.math.max
 import kotlin.math.min
 
-/**
- * Lớp phủ hiển thị chữ dịch cho phép chạm xuyên thấu 100% (FLAG_NOT_TOUCHABLE | FLAG_NOT_FOCUSABLE).
- * Giữ nguyên công thức compute_box_rect và compute_shift từ Roblox_Screen_Translator.py.
- */
 class TouchThroughOverlayView(
     context: Context,
     private val cfg: Config
@@ -521,7 +497,7 @@ class TouchThroughOverlayView(
     private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = cfg.overlayBorderColor
         style = Paint.Style.STROKE
-        strokeWidth = 2.5f
+        strokeWidth = 2.0f
     }
     private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         color = cfg.overlayTextColor
@@ -531,7 +507,7 @@ class TouchThroughOverlayView(
 
     private var blocks: List<TextBlock> = emptyList()
     var paused: Boolean = false
-    val activeRects = mutableListOf<Rect>()
+    val activeScreenRects = CopyOnWriteArrayList<Rect>()
 
     fun updateBlocks(newBlocks: List<TextBlock>) {
         blocks = newBlocks
@@ -540,19 +516,33 @@ class TouchThroughOverlayView(
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        activeRects.clear()
-        if (paused) return
+        val newRects = mutableListOf<Rect>()
+        if (paused) {
+            activeScreenRects.clear()
+            return
+        }
+
+        val loc = IntArray(2)
+        getLocationOnScreen(loc)
+        val offsetX = loc[0]
+        val offsetY = loc[1]
 
         val sw = width
         val sh = height
-        val padX = 12
-        val padY = 8
-        val margin = 8
+        val padX = 8
+        val padY = 5
+        val margin = 6
 
         for (block in blocks) {
             if (block.translatedText.isBlank()) continue
 
-            val wrapWidth = max(220, min(block.width + 2 * padX, (sw * 0.65).toInt()))
+            // Đổi từ tọa độ màn hình vật lý sang tọa độ tương đối của View
+            val bx1 = block.x1 - offsetX
+            val by1 = block.y1 - offsetY
+            val bx2 = block.x2 - offsetX
+            val by2 = block.y2 - offsetY
+
+            val wrapWidth = max(140, min(block.width + 2 * padX, (sw * 0.75).toInt()))
             val layout = StaticLayout.Builder
                 .obtain(block.translatedText, 0, block.translatedText.length, textPaint, wrapWidth)
                 .setAlignment(Layout.Alignment.ALIGN_NORMAL)
@@ -562,9 +552,8 @@ class TouchThroughOverlayView(
             val textW = (0 until layout.lineCount).maxOfOrNull { layout.getLineWidth(it).toInt() } ?: layout.width
             val textH = layout.height
 
-            // Tương đương hàm compute_shift trong Roblox_Screen_Translator.py
-            var tx1 = block.x1
-            var ty1 = block.y1
+            var tx1 = bx1
+            var ty1 = by1
             var tx2 = tx1 + textW
             var ty2 = ty1 + textH
 
@@ -580,16 +569,15 @@ class TouchThroughOverlayView(
             tx2 += dx
             ty2 += dy
 
-            // Tương đương hàm compute_box_rect trong Roblox_Screen_Translator.py
-            val rx1 = max(0, min(block.x1 - padX, tx1 - padX))
-            val ry1 = max(0, min(block.y1 - padY, ty1 - padY))
-            val rx2 = min(sw, max(block.x2 + padX, tx2 + padX))
-            val ry2 = min(sh, max(block.y2 + padY, ty2 + padY))
+            val rx1 = max(0, min(bx1 - padX, tx1 - padX))
+            val ry1 = max(0, min(by1 - padY, ty1 - padY))
+            val rx2 = min(sw, max(bx2 + padX, tx2 + padX))
+            val ry2 = min(sh, max(by2 + padY, ty2 + padY))
 
-            val rect = Rect(rx1, ry1, rx2, ry2)
-            activeRects.add(rect)
+            // Lưu tọa độ màn hình vật lý để FrameChangeDetector loại trừ chính xác
+            newRects.add(Rect(rx1 + offsetX, ry1 + offsetY, rx2 + offsetX, ry2 + offsetY))
 
-            val rectF = RectF(rect)
+            val rectF = RectF(rx1.toFloat(), ry1.toFloat(), rx2.toFloat(), ry2.toFloat())
             canvas.drawRoundRect(rectF, 8f, 8f, bgPaint)
             canvas.drawRoundRect(rectF, 8f, 8f, borderPaint)
 
@@ -598,6 +586,9 @@ class TouchThroughOverlayView(
             layout.draw(canvas)
             canvas.restore()
         }
+
+        activeScreenRects.clear()
+        activeScreenRects.addAll(newRects)
     }
 }
 """,
@@ -608,6 +599,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.MotionEvent
@@ -615,10 +607,6 @@ import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
 
-/**
- * Thanh điều khiển nổi siêu gọn ở mép màn hình thay thế phím nóng F8 (Tạm dừng), F9 (Xóa Cache), F10 (Thoát).
- * Có thể kéo thả tự do quanh màn hình khi đang chơi Roblox.
- */
 class FloatingControlBubble(
     context: Context,
     private val windowManager: WindowManager,
@@ -637,7 +625,7 @@ class FloatingControlBubble(
     }
 
     private val pauseBtn = createButton(context, "🟢 Đang dịch")
-    private val clearBtn = createButton(context, "🧹 Cache")
+    private val clearBtn = createButton(context, "🧹 Xóa")
     private val quitBtn = createButton(context, "✖")
 
     val layoutParams = WindowManager.LayoutParams(
@@ -649,13 +637,13 @@ class FloatingControlBubble(
     ).apply {
         gravity = Gravity.TOP or Gravity.END
         x = 24
-        y = 48
+        y = 64
     }
 
     init {
         pauseBtn.setOnClickListener {
             val isPaused = onTogglePause()
-            pauseBtn.text = if (isPaused) "⏸ Tạm dừng" else "🟢 Đang dịch"
+            pauseBtn.text = if (isPaused) "⏸ Đã dừng" else "🟢 Đang dịch"
             pauseBtn.setTextColor(Color.parseColor(if (isPaused) "#F59E0B" else "#93C5FD"))
         }
         clearBtn.setOnClickListener { onClearCache() }
@@ -667,12 +655,23 @@ class FloatingControlBubble(
         enableDrag()
     }
 
+    fun getScreenBounds(): Rect {
+        val loc = IntArray(2)
+        container.getLocationOnScreen(loc)
+        return Rect(
+            loc[0] - 12,
+            loc[1] - 12,
+            loc[0] + container.width + 12,
+            loc[1] + container.height + 12
+        )
+    }
+
     private fun createButton(context: Context, label: String): TextView {
         return TextView(context).apply {
             text = label
             setTextColor(Color.parseColor("#93C5FD"))
             textSize = 11f
-            setPadding(16, 6, 16, 6)
+            setPadding(14, 6, 14, 6)
         }
     }
 
@@ -716,16 +715,16 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.view.Choreographer
-import android.view.View
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import com.google.mlkit.vision.common.InputImage
@@ -737,12 +736,6 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
 
-/**
- * Dịch vụ chạy nền:
- * - Chụp màn hình Roblox qua MediaProjection
- * - Tích hợp FrameChangeDetector có loại trừ vùng hộp chữ + ẩn nhanh 1 khung hình VSync khi cảnh game đổi
- * - Gọi ML Kit OCR + Gộp khối Union-Find + Dịch thuật CachedTranslator
- */
 class ScreenCaptureService : Service() {
 
     private val cfg = Config()
@@ -779,7 +772,7 @@ class ScreenCaptureService : Service() {
 
         setupOverlays()
         setupMediaProjection(resultCode, data)
-        workerPool.scheduleWithFixedDelay(::scanStep, 400L, cfg.scanIntervalMs, TimeUnit.MILLISECONDS)
+        workerPool.scheduleWithFixedDelay(::scanStep, 600L, cfg.scanIntervalMs, TimeUnit.MILLISECONDS)
         return START_STICKY
     }
 
@@ -789,7 +782,7 @@ class ScreenCaptureService : Service() {
         val channel = NotificationChannel(channelId, "Roblox Screen Translator", NotificationManager.IMPORTANCE_LOW)
         nm.createNotificationChannel(channel)
         val notification: Notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Đang dịch màn hình Roblox")
+            .setContentTitle("Đang dịch màn hình Roblox (V2)")
             .setContentText("Chạm nút nổi trên màn hình để Tạm dừng / Xóa Cache / Thoát")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .build()
@@ -800,7 +793,6 @@ class ScreenCaptureService : Service() {
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         overlayView = TouchThroughOverlayView(this, cfg)
 
-        // Cửa sổ hiển thị bản dịch: chạm xuyên thấu 100% (FLAG_NOT_TOUCHABLE | FLAG_NOT_FOCUSABLE)
         val overlayParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -810,10 +802,13 @@ class ScreenCaptureService : Service() {
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
-        )
+        ).apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
         windowManager.addView(overlayView, overlayParams)
 
-        // Thanh điều khiển nổi thay phím F8, F9, F10
         controlBubble = FloatingControlBubble(
             context = this,
             windowManager = windowManager,
@@ -829,6 +824,7 @@ class ScreenCaptureService : Service() {
                 translator.clearCache()
                 detector.reset()
                 hasFailures = false
+                overlayView.updateBlocks(emptyList())
             },
             onQuit = {
                 stopSelf()
@@ -854,51 +850,72 @@ class ScreenCaptureService : Service() {
         )
     }
 
-    private fun grabCleanBitmap(hideOverlayBriefly: Boolean): Bitmap? {
-        if (hideOverlayBriefly && overlayView.activeRects.isNotEmpty()) {
-            val latch = CountDownLatch(1)
-            mainHandler.post {
-                overlayView.visibility = View.INVISIBLE
-                Choreographer.getInstance().postFrameCallback { latch.countDown() }
-            }
-            latch.await(150, TimeUnit.MILLISECONDS)
-            Thread.sleep(24)
+    private fun readLatestBitmapFromReader(): Bitmap? {
+        val image = imageReader?.acquireLatestImage() ?: return null
+        return try {
+            val plane = image.planes[0]
+            val buffer = plane.buffer
+            val pixelStride = plane.pixelStride
+            val rowStride = plane.rowStride
+            val rowPadding = rowStride - pixelStride * image.width
+            val rawBmp = Bitmap.createBitmap(
+                image.width + rowPadding / pixelStride,
+                image.height,
+                Bitmap.Config.ARGB_8888
+            )
+            rawBmp.copyPixelsFromBuffer(buffer)
+            Bitmap.createBitmap(rawBmp, 0, 0, image.width, image.height)
+        } finally {
+            image.close()
         }
+    }
 
-        val image = imageReader?.acquireLatestImage()
-        val bmp = if (image != null) {
-            try {
-                val plane = image.planes[0]
-                val buffer = plane.buffer
-                val pixelStride = plane.pixelStride
-                val rowStride = plane.rowStride
-                val rowPadding = rowStride - pixelStride * image.width
-                val rawBmp = Bitmap.createBitmap(
-                    image.width + rowPadding / pixelStride,
-                    image.height,
-                    Bitmap.Config.ARGB_8888
-                )
-                rawBmp.copyPixelsFromBuffer(buffer)
-                Bitmap.createBitmap(rawBmp, 0, 0, image.width, image.height)
-            } finally {
-                image.close()
-            }
-        } else null
-
-        if (hideOverlayBriefly) {
-            mainHandler.post { overlayView.visibility = View.VISIBLE }
+    /**
+     * Khi cần chụp ảnh để chạy OCR:
+     * 1. Ẩn tạm thời lớp phủ chữ dịch và nút nổi (alpha = 0f).
+     * 2. Chờ 110ms cho SurfaceFlinger cập nhật khung hình mới không còn lớp phủ.
+     * 3. Xả bỏ khung hình cũ trong hàng đợi ImageReader và lấy khung hình sạch 100%.
+     * 4. Hiện lại lớp phủ ngay lập tức.
+     */
+    private fun grabCleanBitmapForOCR(fallbackBmp: Bitmap): Bitmap {
+        val latch = CountDownLatch(1)
+        mainHandler.post {
+            overlayView.alpha = 0f
+            controlBubble.container.alpha = 0f
+            overlayView.invalidate()
+            controlBubble.container.invalidate()
+            latch.countDown()
         }
-        return bmp
+        latch.await(100, TimeUnit.MILLISECONDS)
+        // Xả khung hình cũ có dính lớp phủ
+        imageReader?.acquireLatestImage()?.close()
+        Thread.sleep(110)
+
+        val clean = readLatestBitmapFromReader() ?: fallbackBmp
+
+        mainHandler.post {
+            overlayView.alpha = 1f
+            controlBubble.container.alpha = 1f
+        }
+        return clean
     }
 
     private fun scanStep() {
         if (!running.get() || paused.get()) return
         try {
-            val probeBmp = grabCleanBitmap(hideOverlayBriefly = false) ?: return
+            val probeBmp = readLatestBitmapFromReader() ?: return
             val sw = probeBmp.width
             val sh = probeBmp.height
 
-            val changed = detector.hasChanged(probeBmp, overlayView.activeRects.toList(), sw, sh)
+            val bubbleRect = controlBubble.getScreenBounds()
+            val statusBarRect = Rect(0, 0, sw, (sh * 0.07).toInt())
+            val allMaskedRects = mutableListOf<Rect>().apply {
+                addAll(overlayView.activeScreenRects)
+                add(bubbleRect)
+                add(statusBarRect)
+            }
+
+            val changed = detector.hasChanged(probeBmp, allMaskedRects, sw, sh)
             if (!changed) {
                 if (hasFailures && lastBlocks.isNotEmpty()) {
                     hasFailures = translator.translateBlocks(lastBlocks) > 0
@@ -907,9 +924,8 @@ class ScreenCaptureService : Service() {
                 return
             }
 
-            // Khi cảnh game bên ngoài vùng chữ thay đổi, lấy 1 khung hình sạch không vướng lớp phủ
-            val cleanBmp = if (overlayView.activeRects.isNotEmpty()) {
-                grabCleanBitmap(hideOverlayBriefly = true) ?: probeBmp
+            val cleanBmp = if (overlayView.activeScreenRects.isNotEmpty()) {
+                grabCleanBitmapForOCR(probeBmp)
             } else probeBmp
 
             val scale = min(1.0f, cfg.ocrMaxWidth.toFloat() / sw)
@@ -919,6 +935,7 @@ class ScreenCaptureService : Service() {
 
             val latch = CountDownLatch(1)
             val rawBlocks = mutableListOf<TextBlock>()
+            val minTopY = (sh * 0.06).toInt()
 
             recognizer.process(InputImage.fromBitmap(ocrBmp, 0))
                 .addOnSuccessListener { visionText ->
@@ -928,12 +945,22 @@ class ScreenCaptureService : Service() {
                             val box = line.boundingBox ?: continue
                             val conf = line.confidence ?: 0.9f
                             if (conf < cfg.minConfidence || TextBlockMerger.shouldSkipText(txt)) continue
+
+                            val lx1 = (box.left / scale).toInt().coerceAtLeast(0)
+                            val ly1 = (box.top / scale).toInt().coerceAtLeast(0)
+                            val lx2 = (box.right / scale).toInt()
+                            val ly2 = (box.bottom / scale).toInt()
+                            val lineRect = Rect(lx1, ly1, lx2, ly2)
+
+                            // Bỏ qua thanh trạng thái trên cùng và vùng nút điều khiển nổi
+                            if (ly1 < minTopY || Rect.intersects(lineRect, bubbleRect)) continue
+
                             rawBlocks.add(
                                 TextBlock(
-                                    x1 = (box.left / scale).toInt().coerceAtLeast(0),
-                                    y1 = (box.top / scale).toInt().coerceAtLeast(0),
-                                    x2 = (box.right / scale).toInt(),
-                                    y2 = (box.bottom / scale).toInt(),
+                                    x1 = lx1,
+                                    y1 = ly1,
+                                    x2 = lx2,
+                                    y2 = ly2,
                                     originalText = txt,
                                     confidence = conf
                                 )
@@ -948,7 +975,7 @@ class ScreenCaptureService : Service() {
                 }
 
             latch.await(4, TimeUnit.SECONDS)
-            val merged = TextBlockMerger.mergeNearbyBlocks(rawBlocks)
+            val merged = TextBlockMerger.mergeNearbyBlocks(rawBlocks, sh)
             hasFailures = translator.translateBlocks(merged) > 0
             lastBlocks = merged
             overlayView.updateBlocks(merged)
@@ -992,11 +1019,6 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 
-/**
- * Màn hình khởi động ứng dụng:
- * 1. Xin quyền Vẽ đè lên ứng dụng khác (SYSTEM_ALERT_WINDOW)
- * 2. Xin quyền Chụp màn hình thời gian thực (MediaProjection) rồi khởi chạy dịch vụ ngầm
- */
 class MainActivity : AppCompatActivity() {
 
     private val captureLauncher = registerForActivityResult(
@@ -1008,7 +1030,7 @@ class MainActivity : AppCompatActivity() {
                 putExtra("DATA", result.data)
             }
             startForegroundService(serviceIntent)
-            Toast.makeText(this, "Đã bật dịch màn hình! Hãy mở Roblox lên chơi.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Đã bật dịch màn hình V2! Hãy mở Roblox hoặc truyện lên.", Toast.LENGTH_LONG).show()
             moveTaskToBack(true)
         } else {
             Toast.makeText(this, "Bạn cần cấp quyền ghi màn hình để dịch.", Toast.LENGTH_SHORT).show()
@@ -1026,7 +1048,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val title = TextView(this).apply {
-            text = "Roblox Real-Time Screen Translator"
+            text = "Roblox Screen Translator V2"
             textSize = 20f
             setTextColor(Color.parseColor("#FFE066"))
             gravity = Gravity.CENTER
@@ -1034,7 +1056,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val desc = TextView(this).apply {
-            text = "Dịch toàn màn hình thời gian thực (kiểu MORT) với lớp phủ chạm xuyên thấu 100%, không ảnh hưởng thao tác xoay camera hay bấm chiêu trong Roblox."
+            text = "Bản cập nhật V2: Đã sửa triệt để lỗi tự quét lặp lại chữ Tiếng Việt và giới hạn kích thước từng hộp hội thoại gọn gàng."
             textSize = 14f
             setTextColor(Color.parseColor("#CBD5E1"))
             gravity = Gravity.CENTER
@@ -1042,7 +1064,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val startBtn = Button(this).apply {
-            text = "BẬT DỊCH MÀN HÌNH ROBLOX"
+            text = "BẬT DỊCH MÀN HÌNH (V2)"
             setBackgroundColor(Color.parseColor("#2563EB"))
             setTextColor(Color.WHITE)
             setPadding(48, 28, 48, 28)
@@ -1069,52 +1091,17 @@ class MainActivity : AppCompatActivity() {
         captureLauncher.launch(mpm.createScreenCaptureIntent())
     }
 }
-""",
-
-    ".github/workflows/build-apk.yml": """name: Build Roblox Translator APK
-
-on:
-  push:
-    branches: [ "main", "master" ]
-  workflow_dispatch:
-
-jobs:
-  build-android-apk:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.7'
-
-      - name: Build Debug APK
-        run: gradle assembleDebug --no-daemon
-
-      - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Roblox-Screen-Translator-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
 """
 }
 
 
 def generate_project() -> None:
-    print(f"[*] Đang khởi tạo dự án Android hoàn chỉnh tại thư mục: {PROJECT_DIR.resolve()} ...")
+    print(f"[*] Đang khởi tạo dự án Android V2 tại: {PROJECT_DIR.resolve()} ...")
     for rel_path, content in FILES.items():
         full_path = PROJECT_DIR / rel_path
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content.strip() + "\n", encoding="utf-8")
-        print(f"    + Đã tạo: {rel_path}")
+        print(f"    + Đã cập nhật: {rel_path}")
 
     zip_path = Path("RobloxTranslatorAPK_Project.zip")
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -1122,14 +1109,7 @@ def generate_project() -> None:
             full_path = PROJECT_DIR / rel_path
             zf.write(full_path, arcname=rel_path)
 
-    print("==========================================================================")
-    print("[THÀNH CÔNG] Đã tạo xong toàn bộ mã nguồn ứng dụng Android (.APK)!")
-    print(f"1. Thư mục mã nguồn : {PROJECT_DIR.resolve()}")
-    print(f"2. File nén dự án   : {zip_path.resolve()}")
-    print("3. Cách lấy file .APK miễn phí không cần cài Android Studio:")
-    print("   - Đẩy toàn bộ các file trong thư mục RobloxTranslatorAPK lên GitHub.")
-    print("   - Vào tab 'Actions' trên GitHub -> Tải file 'Roblox-Screen-Translator-APK' (app-debug.apk) về điện thoại cài đặt!")
-    print("==========================================================================")
+    print("[THÀNH CÔNG] Đã cập nhật mã nguồn Android V2!")
 
 
 if __name__ == "__main__":
